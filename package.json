@@ -1,0 +1,9 @@
+{
+  "name": "html-to-pdf-service",
+  "version": "1.0.0",
+  "private": true,
+  "description": "PDF rendering worker for html-to-pdf-service",
+  "dependencies": {
+    "puppeteer-core": "^24.40.0"
+  }
+}
