@@ -10,8 +10,8 @@ A high-performance backend service that converts raw HTML into formatted PDF doc
 
 ## Prerequisites
 
-- [Rust](https://rustup.rs/) (latest stable)
-- [Node.js](https://nodejs.org/) v18+
+- [Rust](https://rustup.rs/) 1.85+ (edition 2024)
+- [Node.js](https://nodejs.org/) v20+
 - Google Chrome or Chromium installed locally
 
 ## Setup
@@ -67,7 +67,8 @@ All settings are configured via environment variables:
 | `MAX_CONCURRENT_RENDERS` | `4` | Max simultaneous PDF renders |
 | `RENDER_TIMEOUT_SECS` | `30` | Timeout per render request (seconds) |
 | `MAX_BODY_SIZE_BYTES` | `5242880` | Max request body size (5 MB) |
-| `CORS_ALLOW_ORIGIN` | `*` | Allowed CORS origin |
+| `CORS_ALLOW_ORIGIN` | `*` | Allowed CORS origin (a warning is logged when using wildcard) |
+| `TRUST_PROXY` | `false` | Set to `true` to read client IP from `X-Forwarded-For` header (enable when behind a reverse proxy) |
 
 ## Deploying to Render
 
@@ -85,7 +86,7 @@ The API enforces IP-based rate limiting to prevent abuse while remaining open fo
 
 - **Single-source lock:** Only one IP address can use the API at a time. Once a source makes a request, that IP has exclusive access for **1 hour**. Any other IP receives a `429` response until the lock expires.
 - **Per-source cooldown:** The active source must wait **30 seconds** between requests. Requests made within the cooldown window receive a `429` response.
-- **Proxy support:** When behind a reverse proxy (e.g., Render), the server reads the client IP from the `X-Forwarded-For` header. It falls back to the socket address if the header is absent.
+- **Proxy support:** When `TRUST_PROXY=true`, the server reads the client IP from the `X-Forwarded-For` header. This should only be enabled when deployed behind a trusted reverse proxy (e.g., Render, Nginx). When disabled (default), the direct socket address is always used.
 
 ## Error Responses
 

@@ -2,7 +2,7 @@
 FROM rust:1.85-bookworm AS builder
 
 WORKDIR /app
-COPY Cargo.toml Cargo.lock* ./
+COPY Cargo.toml Cargo.lock ./
 COPY src/ src/
 
 RUN cargo build --release
@@ -16,6 +16,7 @@ FROM debian:bookworm-slim
 # Install Chromium and required system libraries
 RUN apt-get update && apt-get install -y --no-install-recommends \
     chromium \
+    curl \
     ca-certificates \
     fonts-liberation \
     fonts-noto-color-emoji \
@@ -59,5 +60,8 @@ USER appuser
 ENV CHROME_EXECUTABLE_PATH=/usr/bin/chromium
 
 EXPOSE 3001
+
+HEALTHCHECK --interval=30s --timeout=5s --retries=3 \
+  CMD curl -f http://localhost:3001/health || exit 1
 
 CMD ["./html-to-pdf-service"]

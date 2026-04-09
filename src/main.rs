@@ -1,7 +1,7 @@
 use axum::{
     Router,
     extract::{ConnectInfo, State},
-    http::{HeaderMap, HeaderValue, StatusCode},
+    http::{HeaderMap, HeaderValue, Method, StatusCode},
     response::IntoResponse,
     routing::{get, post},
 };
@@ -17,6 +17,7 @@ use tokio::{
 use tower_http::{
     cors::{Any, CorsLayer},
     limit::RequestBodyLimitLayer,
+    set_header::SetResponseHeaderLayer,
     trace::TraceLayer,
 };
 
@@ -28,6 +29,7 @@ struct Config {
     render_timeout_secs: u64,
     max_body_size_bytes: usize,
     cors_allow_origin: String,
+    trust_proxy: bool,
 }
 
 impl Config {
@@ -51,6 +53,9 @@ impl Config {
                 .unwrap_or(5_242_880),
             cors_allow_origin: std::env::var("CORS_ALLOW_ORIGIN")
                 .unwrap_or_else(|_| "*".to_string()),
+            trust_proxy: std::env::var("TRUST_PROXY")
+                .map(|v| v == "true" || v == "1")
+                .unwrap_or(false),
         }
     }
 }
@@ -67,13 +72,15 @@ struct WorkerRequest {
 }
 
 #[derive(Deserialize)]
-#[serde(untagged)]
+#[serde(tag = "type")]
 enum WorkerMessage {
+    #[serde(rename = "ready")]
     Ready {
         ready: bool,
         #[serde(default)]
         error: Option<String>,
     },
+    #[serde(rename = "response")]
     Response {
         id: String,
         success: bool,
@@ -185,6 +192,10 @@ struct AppState {
     /// Serialises worker spawn attempts so only one runs at a time.
     worker_spawn_lock: Mutex<()>,
     rate_limiter: Mutex<RateLimiter>,
+    trust_proxy: bool,
+    max_html_size: usize,
+    /// Tracks the last worker spawn attempt to enforce a cooldown between retries.
+    last_spawn_attempt: Mutex<Option<Instant>>,
 }
 
 // --- Worker management ---
@@ -298,7 +309,8 @@ async fn start_worker(state: &Arc<AppState>) -> Result<(), String> {
 }
 
 /// Ensures the worker is alive, respawning if needed.
-/// Uses a lock to prevent concurrent respawn attempts.
+/// Uses a lock to prevent concurrent respawn attempts and a cooldown to avoid
+/// rapid crash-loop spawning (e.g., when Chrome binary is missing).
 async fn ensure_worker(state: &Arc<AppState>) -> Result<(), String> {
     // Fast path: worker is alive, no lock needed.
     if *state.worker_alive.lock().await {
@@ -311,20 +323,36 @@ async fn ensure_worker(state: &Arc<AppState>) -> Result<(), String> {
         return Ok(());
     }
 
+    // Enforce a 10-second cooldown between spawn attempts to prevent rapid retries.
+    {
+        let mut last_attempt = state.last_spawn_attempt.lock().await;
+        if let Some(last) = *last_attempt {
+            let elapsed = Instant::now().duration_since(last);
+            if elapsed < Duration::from_secs(10) {
+                let wait = 10 - elapsed.as_secs();
+                return Err(format!(
+                    "Worker respawn on cooldown. Try again in ~{wait} seconds."
+                ));
+            }
+        }
+        *last_attempt = Some(Instant::now());
+    }
+
     tracing::info!("Respawning PDF worker...");
     start_worker(state).await
 }
 
 // --- Helpers ---
 
-fn extract_client_ip(headers: &HeaderMap, addr: &SocketAddr) -> String {
-    // Respect X-Forwarded-For from reverse proxies (Render, Netlify, etc.)
-    if let Some(forwarded) = headers.get("x-forwarded-for") {
-        if let Ok(val) = forwarded.to_str() {
-            if let Some(first) = val.split(',').next() {
-                let ip = first.trim();
-                if !ip.is_empty() {
-                    return ip.to_string();
+fn extract_client_ip(headers: &HeaderMap, addr: &SocketAddr, trust_proxy: bool) -> String {
+    if trust_proxy {
+        if let Some(forwarded) = headers.get("x-forwarded-for") {
+            if let Ok(val) = forwarded.to_str() {
+                if let Some(first) = val.split(',').next() {
+                    let ip = first.trim();
+                    if !ip.is_empty() {
+                        return ip.to_string();
+                    }
                 }
             }
         }
@@ -350,7 +378,7 @@ async fn generate_pdf_handler(
     axum::Json(payload): axum::Json<GeneratePdfRequest>,
 ) -> impl IntoResponse {
     // Rate limiting
-    let source_ip = extract_client_ip(&headers, &addr);
+    let source_ip = extract_client_ip(&headers, &addr, state.trust_proxy);
     {
         let mut limiter = state.rate_limiter.lock().await;
         if let Err((status, msg)) = limiter.check(&source_ip) {
@@ -363,6 +391,14 @@ async fn generate_pdf_handler(
             StatusCode::BAD_REQUEST,
             plain_text_headers(),
             "Missing or empty 'html' field".into(),
+        );
+    }
+
+    if payload.html.len() > state.max_html_size {
+        return (
+            StatusCode::BAD_REQUEST,
+            plain_text_headers(),
+            "HTML content too large".into(),
         );
     }
 
@@ -384,7 +420,7 @@ async fn generate_pdf_handler(
         return (
             StatusCode::INTERNAL_SERVER_ERROR,
             plain_text_headers(),
-            format!("PDF worker unavailable: {e}").into_bytes(),
+            "PDF service is temporarily unavailable. Please try again later.".into(),
         );
     }
 
@@ -417,7 +453,7 @@ async fn generate_pdf_handler(
     let pdf_path = pdf_file.path().to_string_lossy().to_string();
 
     // Write HTML to temp file
-    if let Err(e) = std::fs::write(&html_path, &payload.html) {
+    if let Err(e) = tokio::fs::write(&html_path, &payload.html).await {
         tracing::error!("Failed to write HTML to temp file: {e}");
         return (
             StatusCode::INTERNAL_SERVER_ERROR,
@@ -508,7 +544,7 @@ async fn generate_pdf_handler(
     drop(permit);
 
     match result {
-        Ok(()) => match std::fs::read(&pdf_path) {
+        Ok(()) => match tokio::fs::read(&pdf_path).await {
             Ok(pdf_bytes) => {
                 let mut headers = HeaderMap::new();
                 headers.insert("content-type", HeaderValue::from_static("application/pdf"));
@@ -532,7 +568,7 @@ async fn generate_pdf_handler(
             (
                 StatusCode::INTERNAL_SERVER_ERROR,
                 plain_text_headers(),
-                format!("PDF rendering failed: {e}").into_bytes(),
+                "PDF rendering failed. Please check your HTML and try again.".into(),
             )
         }
     }
@@ -587,6 +623,7 @@ async fn main() {
         port = config.port,
         max_concurrent = config.max_concurrent_renders,
         timeout_secs = config.render_timeout_secs,
+        trust_proxy = config.trust_proxy,
         "Starting html-to-pdf-service"
     );
 
@@ -598,6 +635,9 @@ async fn main() {
         worker_alive: Arc::new(Mutex::new(false)),
         worker_spawn_lock: Mutex::new(()),
         rate_limiter: Mutex::new(RateLimiter::new()),
+        trust_proxy: config.trust_proxy,
+        max_html_size: config.max_body_size_bytes,
+        last_spawn_attempt: Mutex::new(None),
     });
 
     if let Err(e) = start_worker(&state).await {
@@ -608,20 +648,35 @@ async fn main() {
     }
 
     // CORS
+    if config.cors_allow_origin == "*" {
+        tracing::warn!(
+            "CORS is configured with wildcard origin '*'. \
+             Consider setting CORS_ALLOW_ORIGIN to a specific origin in production."
+        );
+    }
+
     let cors = if config.cors_allow_origin == "*" {
         CorsLayer::new()
             .allow_origin(Any)
-            .allow_methods(Any)
-            .allow_headers(Any)
+            .allow_methods([Method::GET, Method::POST, Method::OPTIONS])
+            .allow_headers([axum::http::header::CONTENT_TYPE])
     } else {
-        let origin: HeaderValue = config
-            .cors_allow_origin
-            .parse()
-            .expect("Invalid CORS_ALLOW_ORIGIN value");
-        CorsLayer::new()
-            .allow_origin(origin)
-            .allow_methods(Any)
-            .allow_headers(Any)
+        match config.cors_allow_origin.parse::<HeaderValue>() {
+            Ok(origin) => CorsLayer::new()
+                .allow_origin(origin)
+                .allow_methods([Method::GET, Method::POST, Method::OPTIONS])
+                .allow_headers([axum::http::header::CONTENT_TYPE]),
+            Err(e) => {
+                tracing::error!(
+                    "Invalid CORS_ALLOW_ORIGIN value '{}': {e}. Falling back to wildcard origin.",
+                    config.cors_allow_origin
+                );
+                CorsLayer::new()
+                    .allow_origin(Any)
+                    .allow_methods([Method::GET, Method::POST, Method::OPTIONS])
+                    .allow_headers([axum::http::header::CONTENT_TYPE])
+            }
+        }
     };
 
     let app = Router::new()
@@ -630,11 +685,19 @@ async fn main() {
         .layer(TraceLayer::new_for_http())
         .layer(cors)
         .layer(RequestBodyLimitLayer::new(config.max_body_size_bytes))
+        .layer(SetResponseHeaderLayer::overriding(
+            axum::http::header::CONTENT_SECURITY_POLICY,
+            HeaderValue::from_static(
+                "default-src 'self'; script-src 'none'; style-src 'unsafe-inline'",
+            ),
+        ))
         .with_state(state.clone());
 
     let addr = format!("0.0.0.0:{}", config.port);
     tracing::info!("Listening on {addr}");
-    let listener = tokio::net::TcpListener::bind(&addr).await.unwrap();
+    let listener = tokio::net::TcpListener::bind(&addr)
+        .await
+        .unwrap_or_else(|e| panic!("Failed to bind to {addr}: {e}. Is the port already in use?"));
 
     axum::serve(
         listener,
@@ -642,7 +705,7 @@ async fn main() {
     )
     .with_graceful_shutdown(shutdown_signal())
     .await
-    .unwrap();
+    .expect("Server encountered a fatal error");
 
     // Clean up: close worker stdin so the Node process exits
     tracing::info!("Shutting down worker...");

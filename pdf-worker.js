@@ -63,6 +63,7 @@ async function main() {
   const chromePath = detectChromePath();
   if (!chromePath) {
     sendResponse({
+      type: "ready",
       ready: false,
       error:
         "Chrome executable not found. Set CHROME_EXECUTABLE_PATH environment variable.",
@@ -76,6 +77,8 @@ async function main() {
       executablePath: chromePath,
       headless: true,
       args: [
+        // --no-sandbox is required in Docker containers. The Dockerfile runs Chrome
+        // as non-root (appuser), and Docker provides its own process isolation.
         "--no-sandbox",
         "--disable-setuid-sandbox",
         "--disable-dev-shm-usage",
@@ -91,48 +94,52 @@ async function main() {
     });
   } catch (err) {
     sendResponse({
+      type: "ready",
       ready: false,
       error: `Failed to launch Chrome: ${err.message}`,
     });
     process.exit(1);
   }
 
-  // If Chrome disconnects unexpectedly, exit so Rust can respawn us.
+  // Track in-flight render IDs so we can send error responses on disconnect.
+  const inFlightIds = new Set();
+
+  // If Chrome disconnects unexpectedly, notify all in-flight renders and exit.
   browser.on("disconnected", () => {
     process.stderr.write("Chrome disconnected unexpectedly, exiting.\n");
+    for (const id of inFlightIds) {
+      sendResponse({ type: "response", id, success: false, error: "Chrome disconnected unexpectedly" });
+    }
+    inFlightIds.clear();
     process.exit(1);
   });
 
-  sendResponse({ ready: true });
+  sendResponse({ type: "ready", ready: true });
 
-  // --- Sequential job queue ---
-  // readline fires "line" events synchronously, but our handler is async.
-  // Queue jobs and process one at a time to avoid interleaving Chrome operations.
-  const jobQueue = [];
-  let processing = false;
-
-  async function processQueue() {
-    if (processing) return;
-    processing = true;
-
-    while (jobQueue.length > 0) {
-      const { id, htmlPath, pdfPath } = jobQueue.shift();
-      await renderPdf(id, htmlPath, pdfPath);
-    }
-
-    processing = false;
-  }
+  // Concurrency is controlled by the Rust semaphore (max_concurrent_renders).
+  // Each job gets its own Chrome page, so they can run in parallel.
 
   async function renderPdf(id, htmlPath, pdfPath) {
+    inFlightIds.add(id);
     let page;
     try {
-      const htmlContent = fs.readFileSync(htmlPath, "utf-8");
+      const htmlContent = await fs.promises.readFile(htmlPath, "utf-8");
 
       page = await browser.newPage();
       page.setDefaultTimeout(PAGE_TIMEOUT_MS);
       page.setDefaultNavigationTimeout(PAGE_TIMEOUT_MS);
 
-      await page.setContent(htmlContent, { waitUntil: "networkidle0", timeout: PAGE_TIMEOUT_MS });
+      await page.setRequestInterception(true);
+      page.on('request', (req) => {
+        const url = req.url();
+        if (url.startsWith('data:image/') || url.startsWith('data:font/') || url === 'about:blank') {
+          req.continue();
+        } else {
+          req.abort('blockedbyclient');
+        }
+      });
+
+      await page.setContent(htmlContent, { waitUntil: "load", timeout: PAGE_TIMEOUT_MS });
       await page.pdf({
         path: pdfPath,
         format: "A4",
@@ -141,10 +148,11 @@ async function main() {
         timeout: PAGE_TIMEOUT_MS,
       });
 
-      sendResponse({ id, success: true });
+      sendResponse({ type: "response", id, success: true });
     } catch (err) {
-      sendResponse({ id, success: false, error: err.message });
+      sendResponse({ type: "response", id, success: false, error: err.message });
     } finally {
+      inFlightIds.delete(id);
       if (page) {
         try {
           await page.close();
@@ -165,8 +173,14 @@ async function main() {
       return;
     }
 
-    jobQueue.push(request);
-    processQueue();
+    const { id, htmlPath, pdfPath } = request;
+    if (!id || !htmlPath || !pdfPath) {
+      if (id) sendResponse({ type: "response", id, success: false, error: "Missing required fields" });
+      return;
+    }
+    renderPdf(id, htmlPath, pdfPath).catch((err) => {
+      sendResponse({ type: "response", id, success: false, error: err.message || "Unexpected error" });
+    });
   });
 
   rl.on("close", async () => {
