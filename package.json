@@ -1,6 +1,6 @@
 {
   "name": "html-to-pdf-service",
-  "version": "1.2.1",
+  "version": "1.2.2",
   "private": true,
   "description": "PDF rendering worker for html-to-pdf-service",
   "dependencies": {

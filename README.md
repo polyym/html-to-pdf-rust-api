@@ -10,7 +10,7 @@ A high-performance backend service that converts raw HTML into formatted PDF doc
 
 ## Prerequisites
 
-- [Rust](https://rustup.rs/) 1.85+ (edition 2024)
+- [Rust](https://rustup.rs/) 1.94+ (edition 2024)
 - [Node.js](https://nodejs.org/) v20+
 - Google Chrome or Chromium installed locally
 

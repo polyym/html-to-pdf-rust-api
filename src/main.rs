@@ -164,11 +164,12 @@ impl RateLimiter {
 
         // Clean up expired active source (1-hour window)
         if let Some(ref active) = self.active_source
-            && now.duration_since(self.active_source_since) > Duration::from_secs(3600) {
-                tracing::info!("Active source '{}' expired after 1 hour", active);
-                self.active_source = None;
-                self.last_request.clear();
-            }
+            && now.duration_since(self.active_source_since) > Duration::from_secs(3600)
+        {
+            tracing::info!("Active source '{}' expired after 1 hour", active);
+            self.active_source = None;
+            self.last_request.clear();
+        }
 
         // Check if this source is allowed (single source per hour)
         match &self.active_source {
@@ -379,13 +380,14 @@ async fn ensure_worker(state: &Arc<AppState>) -> Result<(), String> {
 fn extract_client_ip(headers: &HeaderMap, addr: &SocketAddr, trust_proxy: bool) -> String {
     if trust_proxy
         && let Some(forwarded) = headers.get("x-forwarded-for")
-            && let Ok(val) = forwarded.to_str()
-                && let Some(first) = val.split(',').next() {
-                    let ip = first.trim();
-                    if !ip.is_empty() {
-                        return ip.to_string();
-                    }
-                }
+        && let Ok(val) = forwarded.to_str()
+        && let Some(first) = val.split(',').next()
+    {
+        let ip = first.trim();
+        if !ip.is_empty() {
+            return ip.to_string();
+        }
+    }
     addr.ip().to_string()
 }
 
