@@ -69,6 +69,13 @@ struct WorkerRequest {
     html_path: String,
     #[serde(rename = "pdfPath")]
     pdf_path: String,
+    landscape: bool,
+    format: String,
+    #[serde(rename = "printBackground")]
+    print_background: bool,
+    scale: f64,
+    #[serde(rename = "omitBackground")]
+    omit_background: bool,
 }
 
 #[derive(Deserialize)]
@@ -91,9 +98,35 @@ enum WorkerMessage {
 
 // --- Request payload ---
 
+fn default_true() -> bool {
+    true
+}
+
+fn default_format() -> String {
+    "A4".to_string()
+}
+
+fn default_scale() -> f64 {
+    1.0
+}
+
+const VALID_FORMATS: &[&str] = &[
+    "Letter", "Legal", "Tabloid", "Ledger", "A0", "A1", "A2", "A3", "A4", "A5", "A6",
+];
+
 #[derive(Deserialize)]
 struct GeneratePdfRequest {
     html: String,
+    #[serde(default)]
+    landscape: bool,
+    #[serde(default = "default_format")]
+    format: String,
+    #[serde(default = "default_true", rename = "printBackground")]
+    print_background: bool,
+    #[serde(default = "default_scale")]
+    scale: f64,
+    #[serde(default, rename = "omitBackground")]
+    omit_background: bool,
 }
 
 // --- Health response ---
@@ -402,6 +435,22 @@ async fn generate_pdf_handler(
         );
     }
 
+    if !(0.1..=2.0).contains(&payload.scale) {
+        return (
+            StatusCode::BAD_REQUEST,
+            plain_text_headers(),
+            "Scale must be between 0.1 and 2.0".into(),
+        );
+    }
+
+    if !VALID_FORMATS.iter().any(|f| f.eq_ignore_ascii_case(&payload.format)) {
+        return (
+            StatusCode::BAD_REQUEST,
+            plain_text_headers(),
+            format!("Invalid format. Valid options: {}", VALID_FORMATS.join(", ")).into(),
+        );
+    }
+
     // Concurrency gate
     let permit = match state.semaphore.try_acquire() {
         Ok(p) => p,
@@ -468,6 +517,11 @@ async fn generate_pdf_handler(
         id: request_id.clone(),
         html_path: html_path.clone(),
         pdf_path: pdf_path.clone(),
+        landscape: payload.landscape,
+        format: payload.format,
+        print_background: payload.print_background,
+        scale: payload.scale,
+        omit_background: payload.omit_background,
     };
 
     let (tx, rx) = oneshot::channel();

@@ -119,7 +119,7 @@ async function main() {
   // Concurrency is controlled by the Rust semaphore (max_concurrent_renders).
   // Each job gets its own Chrome page, so they can run in parallel.
 
-  async function renderPdf(id, htmlPath, pdfPath) {
+  async function renderPdf(id, htmlPath, pdfPath, options = {}) {
     inFlightIds.add(id);
     let page;
     try {
@@ -142,8 +142,11 @@ async function main() {
       await page.setContent(htmlContent, { waitUntil: "load", timeout: PAGE_TIMEOUT_MS });
       await page.pdf({
         path: pdfPath,
-        format: "A4",
-        printBackground: true,
+        format: options.format || "A4",
+        landscape: !!options.landscape,
+        printBackground: options.printBackground !== false,
+        scale: options.scale || 1,
+        omitBackground: !!options.omitBackground,
         margin: { top: "1cm", right: "1cm", bottom: "1cm", left: "1cm" },
         timeout: PAGE_TIMEOUT_MS,
       });
@@ -173,12 +176,12 @@ async function main() {
       return;
     }
 
-    const { id, htmlPath, pdfPath } = request;
+    const { id, htmlPath, pdfPath, landscape, format, printBackground, scale, omitBackground } = request;
     if (!id || !htmlPath || !pdfPath) {
       if (id) sendResponse({ type: "response", id, success: false, error: "Missing required fields" });
       return;
     }
-    renderPdf(id, htmlPath, pdfPath).catch((err) => {
+    renderPdf(id, htmlPath, pdfPath, { landscape, format, printBackground, scale, omitBackground }).catch((err) => {
       sendResponse({ type: "response", id, success: false, error: err.message || "Unexpected error" });
     });
   });

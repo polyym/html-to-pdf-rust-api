@@ -46,6 +46,31 @@ curl -X POST http://localhost:3001/generate-pdf \
   -o output.pdf
 ```
 
+**Request with PDF options:**
+```bash
+curl -X POST http://localhost:3001/generate-pdf \
+  -H "Content-Type: application/json" \
+  -d '{
+    "html": "<h1>Hello</h1><p>World</p>",
+    "landscape": true,
+    "format": "Letter",
+    "printBackground": true,
+    "scale": 0.8,
+    "omitBackground": false
+  }' \
+  -o output.pdf
+```
+
+All PDF options are optional. When omitted, defaults match the original behavior.
+
+| Option | Type | Default | Description |
+|--------|------|---------|-------------|
+| `landscape` | boolean | `false` | Page orientation |
+| `format` | string | `"A4"` | Page size: Letter, Legal, Tabloid, Ledger, A0-A6 |
+| `printBackground` | boolean | `true` | Include CSS background graphics |
+| `scale` | number | `1` | Page scale factor (0.1 - 2.0) |
+| `omitBackground` | boolean | `false` | Omit the default white page background |
+
 **Response:** Binary PDF with `Content-Type: application/pdf`
 
 ### `GET /health`
@@ -92,7 +117,7 @@ The API enforces IP-based rate limiting to prevent abuse while remaining open fo
 
 | Status | Condition |
 |--------|-----------|
-| 400 | Malformed JSON, missing or empty `html` field |
+| 400 | Malformed JSON, missing or empty `html` field, invalid `format`, or `scale` out of range |
 | 413 | Payload exceeds body size limit |
 | 429 | Another source is currently active (single-source lock) |
 | 429 | Request sent within 30-second cooldown window |
