@@ -163,13 +163,12 @@ impl RateLimiter {
         let now = Instant::now();
 
         // Clean up expired active source (1-hour window)
-        if let Some(ref active) = self.active_source {
-            if now.duration_since(self.active_source_since) > Duration::from_secs(3600) {
+        if let Some(ref active) = self.active_source
+            && now.duration_since(self.active_source_since) > Duration::from_secs(3600) {
                 tracing::info!("Active source '{}' expired after 1 hour", active);
                 self.active_source = None;
                 self.last_request.clear();
             }
-        }
 
         // Check if this source is allowed (single source per hour)
         match &self.active_source {
@@ -378,18 +377,15 @@ async fn ensure_worker(state: &Arc<AppState>) -> Result<(), String> {
 // --- Helpers ---
 
 fn extract_client_ip(headers: &HeaderMap, addr: &SocketAddr, trust_proxy: bool) -> String {
-    if trust_proxy {
-        if let Some(forwarded) = headers.get("x-forwarded-for") {
-            if let Ok(val) = forwarded.to_str() {
-                if let Some(first) = val.split(',').next() {
+    if trust_proxy
+        && let Some(forwarded) = headers.get("x-forwarded-for")
+            && let Ok(val) = forwarded.to_str()
+                && let Some(first) = val.split(',').next() {
                     let ip = first.trim();
                     if !ip.is_empty() {
                         return ip.to_string();
                     }
                 }
-            }
-        }
-    }
     addr.ip().to_string()
 }
 
@@ -680,6 +676,18 @@ async fn main() {
         trust_proxy = config.trust_proxy,
         "Starting html-to-pdf-service"
     );
+
+    if config.trust_proxy {
+        tracing::info!(
+            "TRUST_PROXY enabled: rate limiting uses real client IPs from X-Forwarded-For. \
+            Single-source 1-hour lock is active."
+        );
+    } else {
+        tracing::info!(
+            "TRUST_PROXY disabled: rate limiting uses socket address. \
+            On proxied deployments, the 30-second cooldown acts as a global throttle."
+        );
+    }
 
     let state = Arc::new(AppState {
         worker_stdin: Mutex::new(None),

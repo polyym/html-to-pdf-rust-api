@@ -172,7 +172,8 @@ async function main() {
     let request;
     try {
       request = JSON.parse(line);
-    } catch {
+    } catch (err) {
+      console.error(`[worker] Failed to parse stdin JSON: ${err.message}`);
       return;
     }
 

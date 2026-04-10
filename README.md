@@ -81,6 +81,8 @@ Returns service health status.
 { "status": "ok", "worker_alive": true }
 ```
 
+Returns `"status": "degraded"` when the worker process is down.
+
 ## Configuration
 
 All settings are configured via environment variables:
@@ -112,6 +114,13 @@ The API enforces IP-based rate limiting to prevent abuse while remaining open fo
 - **Single-source lock:** Only one IP address can use the API at a time. Once a source makes a request, that IP has exclusive access for **1 hour**. Any other IP receives a `429` response until the lock expires.
 - **Per-source cooldown:** The active source must wait **30 seconds** between requests. Requests made within the cooldown window receive a `429` response.
 - **Proxy support:** When `TRUST_PROXY=true`, the server reads the client IP from the `X-Forwarded-For` header. This should only be enabled when deployed behind a trusted reverse proxy (e.g., Render, Nginx). When disabled (default), the direct socket address is always used.
+
+**Behaviour depends on `TRUST_PROXY`:**
+
+- `TRUST_PROXY=false` (default): On proxied platforms, all clients share the same apparent IP. The 1-hour lock is bypassed and the 30-second cooldown becomes a global throttle across all users.
+- `TRUST_PROXY=true`: Real client IPs are used. The 1-hour single-source lock is enforced per IP, blocking all other clients for the duration of the window.
+
+Both are valid patterns. Set `TRUST_PROXY` according to your intended access policy.
 
 ## Error Responses
 
