@@ -45,9 +45,24 @@ impl RateLimiter {
             self.last_request.clear();
         }
 
-        // Check if this source is allowed (single source per hour)
-        match &self.active_source {
-            Some(active) if active != source => {
+        // If there's an active source, check the 30-second cooldown first
+        // using the active source's last request time. This runs before the
+        // single-source check so the user sees a helpful "wait N seconds"
+        // message even if their IP varies slightly between proxy hops.
+        if let Some(ref active) = self.active_source {
+            if let Some(last) = self.last_request.get(active) {
+                let elapsed = now.duration_since(*last);
+                if elapsed < Duration::from_secs(30) {
+                    let wait = 30 - elapsed.as_secs();
+                    return Err((
+                        StatusCode::TOO_MANY_REQUESTS,
+                        format!("Rate limited. Please wait {wait} seconds."),
+                    ));
+                }
+            }
+
+            // Past cooldown — now check if this is a different source
+            if active != source {
                 let remaining = Duration::from_secs(3600)
                     .saturating_sub(now.duration_since(self.active_source_since));
                 let mins = remaining.as_secs() / 60;
@@ -57,19 +72,6 @@ impl RateLimiter {
                         "API is currently locked to another source. Try again in ~{} minutes.",
                         mins + 1
                     ),
-                ));
-            }
-            _ => {}
-        }
-
-        // Check 30-second cooldown for this source
-        if let Some(last) = self.last_request.get(source) {
-            let elapsed = now.duration_since(*last);
-            if elapsed < Duration::from_secs(30) {
-                let wait = 30 - elapsed.as_secs();
-                return Err((
-                    StatusCode::TOO_MANY_REQUESTS,
-                    format!("Rate limited. Please wait {wait} seconds."),
                 ));
             }
         }
