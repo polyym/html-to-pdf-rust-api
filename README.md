@@ -95,7 +95,7 @@ Returns service health status.
 ```json
 {
   "status": "ok",
-  "version": "1.3.1",
+  "version": "<cargo_version>",
   "uptime_secs": 3600,
   "worker_alive": true,
   "renders": { "available": 3, "max": 4 },
