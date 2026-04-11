@@ -45,12 +45,10 @@ RUN groupadd -r appuser && useradd -r -g appuser -d /app -s /sbin/nologin appuse
 
 WORKDIR /app
 
-# Install Node.js dependencies
-COPY package.json package-lock.json* ./
-RUN npm ci --omit=dev && npm cache clean --force
-
-# Copy application files
-COPY pdf-worker.js ./
+# Install Node.js dependencies and build TypeScript worker
+COPY package.json package-lock.json* tsconfig.json ./
+COPY pdf-worker.ts ./
+RUN npm ci && npx tsc && npm prune --omit=dev && npm cache clean --force
 COPY --from=builder /app/target/release/html-to-pdf-service ./
 
 # Set ownership and switch to non-root user

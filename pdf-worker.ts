@@ -1,26 +1,52 @@
-const puppeteer = require("puppeteer-core");
-const fs = require("fs");
-const path = require("path");
-const readline = require("readline");
-const os = require("os");
+import puppeteer, { Browser, Page, HTTPRequest, PaperFormat } from "puppeteer-core";
+import fs from "fs";
+import path from "path";
+import readline from "readline";
+import os from "os";
+
+// --- IPC types (must mirror Rust WorkerRequest / WorkerMessage in src/worker.rs) ---
+
+/** Render request received from the Rust server via stdin. */
+interface WorkerRequest {
+  id: string;
+  htmlPath: string;
+  pdfPath: string;
+  landscape: boolean;
+  format: string;
+  printBackground: boolean;
+  scale: number;
+  omitBackground: boolean;
+}
+
+/** Message sent to the Rust server via stdout. */
+type WorkerMessage =
+  | { type: "ready"; ready: boolean; error?: string }
+  | { type: "response"; id: string; success: boolean; error?: string };
+
+// --- Constants ---
 
 const PAGE_TIMEOUT_MS = 25_000;
 
-process.on("unhandledRejection", (err) => {
+// --- Global error handlers ---
+
+process.on("unhandledRejection", (err: unknown) => {
   process.stderr.write(`Unhandled rejection: ${err}\n`);
 });
 
-process.on("uncaughtException", (err) => {
+process.on("uncaughtException", (err: Error) => {
   process.stderr.write(`Uncaught exception: ${err}\n`);
   process.exit(1);
 });
 
-function detectChromePath() {
+// --- Helpers ---
+
+/** Returns the Chrome/Chromium binary path, checking `CHROME_EXECUTABLE_PATH` then platform defaults. */
+function detectChromePath(): string | null {
   const envPath = process.env.CHROME_EXECUTABLE_PATH;
   if (envPath) return envPath;
 
   const platform = os.platform();
-  const candidates =
+  const candidates: string[] =
     platform === "win32"
       ? [
           path.join(
@@ -55,14 +81,22 @@ function detectChromePath() {
   return null;
 }
 
-function sendResponse(obj) {
-  process.stdout.write(JSON.stringify(obj) + "\n");
+/** Safely extracts a message string from an unknown error value. */
+function toErrorMessage(err: unknown): string {
+  return err instanceof Error ? err.message : String(err);
 }
 
-async function main() {
+/** Writes a JSON message to stdout (consumed by the Rust server). */
+function sendMessage(msg: WorkerMessage): void {
+  process.stdout.write(JSON.stringify(msg) + "\n");
+}
+
+// --- Main ---
+
+async function main(): Promise<void> {
   const chromePath = detectChromePath();
   if (!chromePath) {
-    sendResponse({
+    sendMessage({
       type: "ready",
       ready: false,
       error:
@@ -71,7 +105,7 @@ async function main() {
     process.exit(1);
   }
 
-  let browser;
+  let browser: Browser;
   try {
     browser = await puppeteer.launch({
       executablePath: chromePath,
@@ -93,69 +127,72 @@ async function main() {
       ],
     });
   } catch (err) {
-    sendResponse({
+    sendMessage({
       type: "ready",
       ready: false,
-      error: `Failed to launch Chrome: ${err.message}`,
+      error: `Failed to launch Chrome: ${toErrorMessage(err)}`,
     });
     process.exit(1);
   }
 
   // Track in-flight render IDs so we can send error responses on disconnect.
-  const inFlightIds = new Set();
+  const inFlightIds = new Set<string>();
 
   // If Chrome disconnects unexpectedly, notify all in-flight renders and exit.
   browser.on("disconnected", () => {
     process.stderr.write("Chrome disconnected unexpectedly, exiting.\n");
     for (const id of inFlightIds) {
-      sendResponse({ type: "response", id, success: false, error: "Chrome disconnected unexpectedly" });
+      sendMessage({ type: "response", id, success: false, error: "Chrome disconnected unexpectedly" });
     }
     inFlightIds.clear();
     process.exit(1);
   });
 
-  sendResponse({ type: "ready", ready: true });
+  sendMessage({ type: "ready", ready: true });
 
   // Concurrency is controlled by the Rust semaphore (max_concurrent_renders).
   // Each job gets its own Chrome page, so they can run in parallel.
 
-  async function renderPdf(id, htmlPath, pdfPath, options = {}) {
-    inFlightIds.add(id);
-    let page;
+  /** Opens a new Chrome page, loads the HTML, generates a PDF, and reports the result. */
+  async function renderPdf(req: WorkerRequest): Promise<void> {
+    inFlightIds.add(req.id);
+    let page: Page | undefined;
     try {
-      const htmlContent = await fs.promises.readFile(htmlPath, "utf-8");
+      const htmlContent = await fs.promises.readFile(req.htmlPath, "utf-8");
 
       page = await browser.newPage();
       page.setDefaultTimeout(PAGE_TIMEOUT_MS);
       page.setDefaultNavigationTimeout(PAGE_TIMEOUT_MS);
 
+      // Block all external network requests to prevent SSRF — only data URIs
+      // (inline images/fonts) and about:blank are allowed through.
       await page.setRequestInterception(true);
-      page.on('request', (req) => {
-        const url = req.url();
-        if (url.startsWith('data:image/') || url.startsWith('data:font/') || url === 'about:blank') {
-          req.continue();
+      page.on("request", (httpReq: HTTPRequest) => {
+        const url = httpReq.url();
+        if (url.startsWith("data:image/") || url.startsWith("data:font/") || url === "about:blank") {
+          httpReq.continue();
         } else {
-          req.abort('blockedbyclient');
+          httpReq.abort("blockedbyclient");
         }
       });
 
       await page.setContent(htmlContent, { waitUntil: "load", timeout: PAGE_TIMEOUT_MS });
       await page.pdf({
-        path: pdfPath,
-        format: options.format || "A4",
-        landscape: !!options.landscape,
-        printBackground: options.printBackground !== false,
-        scale: options.scale || 1,
-        omitBackground: !!options.omitBackground,
+        path: req.pdfPath,
+        format: req.format as PaperFormat,
+        landscape: req.landscape,
+        printBackground: req.printBackground,
+        scale: req.scale,
+        omitBackground: req.omitBackground,
         margin: { top: "1cm", right: "1cm", bottom: "1cm", left: "1cm" },
         timeout: PAGE_TIMEOUT_MS,
       });
 
-      sendResponse({ type: "response", id, success: true });
+      sendMessage({ type: "response", id: req.id, success: true });
     } catch (err) {
-      sendResponse({ type: "response", id, success: false, error: err.message });
+      sendMessage({ type: "response", id: req.id, success: false, error: toErrorMessage(err) });
     } finally {
-      inFlightIds.delete(id);
+      inFlightIds.delete(req.id);
       if (page) {
         try {
           await page.close();
@@ -168,22 +205,21 @@ async function main() {
 
   const rl = readline.createInterface({ input: process.stdin });
 
-  rl.on("line", (line) => {
-    let request;
+  rl.on("line", (line: string) => {
+    let request: WorkerRequest;
     try {
-      request = JSON.parse(line);
+      request = JSON.parse(line) as WorkerRequest;
     } catch (err) {
-      console.error(`[worker] Failed to parse stdin JSON: ${err.message}`);
+      console.error(`[worker] Failed to parse stdin JSON: ${toErrorMessage(err)}`);
       return;
     }
 
-    const { id, htmlPath, pdfPath, landscape, format, printBackground, scale, omitBackground } = request;
-    if (!id || !htmlPath || !pdfPath) {
-      if (id) sendResponse({ type: "response", id, success: false, error: "Missing required fields" });
+    if (!request.id || !request.htmlPath || !request.pdfPath) {
+      if (request.id) sendMessage({ type: "response", id: request.id, success: false, error: "Missing required fields" });
       return;
     }
-    renderPdf(id, htmlPath, pdfPath, { landscape, format, printBackground, scale, omitBackground }).catch((err) => {
-      sendResponse({ type: "response", id, success: false, error: err.message || "Unexpected error" });
+    renderPdf(request).catch((err: unknown) => {
+      sendMessage({ type: "response", id: request.id, success: false, error: toErrorMessage(err) });
     });
   });
 

@@ -8,6 +8,17 @@ A high-performance backend service that converts raw HTML into formatted PDF doc
 - **Node.js worker** maintains a warm headless Chrome instance for fast PDF rendering
 - Communication between Rust and Node.js via stdin/stdout newline-delimited JSON
 
+```
+src/
+├── main.rs            Entry point, router, middleware, shutdown
+├── config.rs          Environment variable parsing
+├── state.rs           Shared application state
+├── rate_limiter.rs    IP-based rate limiting
+├── worker.rs          Node.js worker IPC and lifecycle
+├── handlers.rs        HTTP handlers and request validation
+pdf-worker.ts          Headless Chrome PDF rendering (TypeScript)
+```
+
 ## Prerequisites
 
 - [Rust](https://rustup.rs/) 1.94+ (edition 2024)
@@ -19,6 +30,9 @@ A high-performance backend service that converts raw HTML into formatted PDF doc
 ```bash
 # Install Node.js dependencies
 npm install
+
+# Build the TypeScript worker
+npm run build
 
 # Build and run the server
 cargo run
