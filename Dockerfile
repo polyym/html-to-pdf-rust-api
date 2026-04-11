@@ -38,7 +38,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 # Copy Node.js from the official image (avoids Debian's outdated nodejs package)
 COPY --from=node /usr/local/bin/node /usr/local/bin/node
 COPY --from=node /usr/local/lib/node_modules /usr/local/lib/node_modules
-RUN ln -s /usr/local/lib/node_modules/npm/bin/npm-cli.js /usr/local/bin/npm
+RUN ln -s /usr/local/lib/node_modules/npm/bin/npm-cli.js /usr/local/bin/npm \
+    && ln -s /usr/local/lib/node_modules/npm/bin/npx-cli.js /usr/local/bin/npx
 
 # Create non-root user
 RUN groupadd -r appuser && useradd -r -g appuser -d /app -s /sbin/nologin appuser
@@ -46,9 +47,9 @@ RUN groupadd -r appuser && useradd -r -g appuser -d /app -s /sbin/nologin appuse
 WORKDIR /app
 
 # Install Node.js dependencies and build TypeScript worker
-COPY package.json package-lock.json* tsconfig.json ./
+COPY package.json package-lock.json* tsconfig.json sync-version.js ./
 COPY pdf-worker.ts ./
-RUN npm ci && npx tsc && npm prune --omit=dev && npm cache clean --force
+RUN npm ci && npm run build && npm prune --omit=dev && npm cache clean --force
 COPY --from=builder /app/target/release/html-to-pdf-service ./
 
 # Set ownership and switch to non-root user

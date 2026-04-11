@@ -163,13 +163,17 @@ async function main(): Promise<void> {
       page = await browser.newPage();
       page.setDefaultTimeout(PAGE_TIMEOUT_MS);
       page.setDefaultNavigationTimeout(PAGE_TIMEOUT_MS);
+      // Disable JS to prevent inline <script> abuse (CPU bombs, memory
+      // exhaustion). Static HTML/CSS is sufficient for document rendering.
+      await page.setJavaScriptEnabled(false);
 
       // Block all external network requests to prevent SSRF — only data URIs
-      // (inline images/fonts) and about:blank are allowed through.
+      // (inline resources such as images, fonts, and stylesheets) and
+      // about:blank are allowed through.
       await page.setRequestInterception(true);
       page.on("request", (httpReq: HTTPRequest) => {
         const url = httpReq.url();
-        if (url.startsWith("data:image/") || url.startsWith("data:font/") || url === "about:blank") {
+        if (url.startsWith("data:") || url === "about:blank") {
           httpReq.continue();
         } else {
           httpReq.abort("blockedbyclient");

@@ -84,4 +84,19 @@ impl RateLimiter {
 
         Ok(())
     }
+
+    /// Returns the current rate limiter state for the health endpoint.
+    ///
+    /// Reports whether the API is locked to a source and, if so, how many
+    /// seconds remain. Does **not** expose the active source IP.
+    pub fn status(&self) -> (bool, u64) {
+        match &self.active_source {
+            Some(_) => {
+                let elapsed = Instant::now().duration_since(self.active_source_since);
+                let remaining = Duration::from_secs(3600).saturating_sub(elapsed);
+                (true, remaining.as_secs())
+            }
+            None => (false, 0),
+        }
+    }
 }

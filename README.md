@@ -17,6 +17,7 @@ src/
 ├── worker.rs          Node.js worker IPC and lifecycle
 ├── handlers.rs        HTTP handlers and request validation
 pdf-worker.ts          Headless Chrome PDF rendering (TypeScript)
+sync-version.js        Syncs package.json version from Cargo.toml
 ```
 
 ## Prerequisites
@@ -80,7 +81,7 @@ All PDF options are optional. When omitted, defaults match the original behavior
 | Option | Type | Default | Description |
 |--------|------|---------|-------------|
 | `landscape` | boolean | `false` | Page orientation |
-| `format` | string | `"A4"` | Page size: Letter, Legal, Tabloid, Ledger, A0-A6 |
+| `format` | string | `"A4"` | Page size (case-insensitive): Letter, Legal, Tabloid, Ledger, A0-A6 |
 | `printBackground` | boolean | `true` | Include CSS background graphics |
 | `scale` | number | `1` | Page scale factor (0.1 - 2.0) |
 | `omitBackground` | boolean | `false` | Omit the default white page background |
@@ -92,7 +93,14 @@ All PDF options are optional. When omitted, defaults match the original behavior
 Returns service health status.
 
 ```json
-{ "status": "ok", "worker_alive": true }
+{
+  "status": "ok",
+  "version": "1.3.1",
+  "uptime_secs": 3600,
+  "worker_alive": true,
+  "renders": { "available": 3, "max": 4 },
+  "rate_limiter": { "locked": false, "lock_remaining_secs": 0 }
+}
 ```
 
 Returns `"status": "degraded"` when the worker process is down.
@@ -135,6 +143,12 @@ The API enforces IP-based rate limiting to prevent abuse while remaining open fo
 - `TRUST_PROXY=true`: Real client IPs are used. The 1-hour single-source lock is enforced per IP, blocking all other clients for the duration of the window.
 
 Both are valid patterns. Set `TRUST_PROXY` according to your intended access policy.
+
+## Security
+
+- **No JavaScript execution:** The renderer runs with JavaScript disabled. Inline `<script>` tags and JS event handlers in the submitted HTML will not execute. Only static HTML and CSS are rendered.
+- **SSRF protection:** All external network requests from the rendered page are blocked. Only inline data URIs and `about:blank` are allowed.
+- **Request isolation:** Each render gets its own Chrome page with request interception enabled.
 
 ## Error Responses
 

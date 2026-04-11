@@ -36,4 +36,8 @@ pub struct AppState {
     pub max_html_size: usize,
     /// Tracks the last worker spawn attempt to enforce a cooldown between retries.
     pub last_spawn_attempt: Mutex<Option<Instant>>,
+    /// Server start time, used to compute uptime in the health endpoint.
+    pub started_at: Instant,
+    /// Total render slots (mirrors the semaphore capacity for health reporting).
+    pub max_concurrent: usize,
 }

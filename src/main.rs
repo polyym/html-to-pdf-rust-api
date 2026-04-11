@@ -127,6 +127,8 @@ async fn main() {
         trust_proxy: config.trust_proxy,
         max_html_size: config.max_body_size_bytes,
         last_spawn_attempt: Mutex::new(None),
+        started_at: tokio::time::Instant::now(),
+        max_concurrent: config.max_concurrent_renders,
     });
 
     if let Err(e) = worker::start_worker(&state).await {

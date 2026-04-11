@@ -57,19 +57,40 @@ pub struct GeneratePdfRequest {
 #[derive(Serialize)]
 struct HealthResponse {
     status: &'static str,
+    version: &'static str,
+    uptime_secs: u64,
     worker_alive: bool,
+    renders: RenderStatus,
+    rate_limiter: RateLimiterStatus,
+}
+
+/// Current render slot usage (nested under `renders` in the health response).
+#[derive(Serialize)]
+struct RenderStatus {
+    available: usize,
+    max: usize,
+}
+
+/// Current rate limiter state (nested under `rate_limiter` in the health response).
+#[derive(Serialize)]
+struct RateLimiterStatus {
+    locked: bool,
+    lock_remaining_secs: u64,
 }
 
 // --- Helpers ---
 
 /// Returns the client IP, reading from `X-Forwarded-For` when `trust_proxy` is true.
+///
+/// Uses the **rightmost** entry, which is the one added by the nearest trusted
+/// proxy and cannot be spoofed by the client (assuming a single proxy layer).
 fn extract_client_ip(headers: &HeaderMap, addr: &SocketAddr, trust_proxy: bool) -> String {
     if trust_proxy
         && let Some(forwarded) = headers.get("x-forwarded-for")
         && let Ok(val) = forwarded.to_str()
-        && let Some(first) = val.split(',').next()
+        && let Some(last) = val.rsplit(',').next()
     {
-        let ip = first.trim();
+        let ip = last.trim();
         if !ip.is_empty() {
             return ip.to_string();
         }
@@ -85,12 +106,27 @@ fn plain_text_headers() -> HeaderMap {
 
 // --- Handlers ---
 
-/// Returns `{"status":"ok"}` when the worker is alive, `"degraded"` otherwise.
+/// Returns service health including version, uptime, worker status, render
+/// capacity, and rate limiter state. Status is `"ok"` when the worker is
+/// alive, `"degraded"` otherwise.
 pub async fn health_handler(State(state): State<Arc<AppState>>) -> impl IntoResponse {
     let alive = *state.worker_alive.lock().await;
+    let uptime = state.started_at.elapsed().as_secs();
+    let (locked, lock_remaining) = state.rate_limiter.lock().await.status();
+
     let resp = HealthResponse {
         status: if alive { "ok" } else { "degraded" },
+        version: env!("CARGO_PKG_VERSION"),
+        uptime_secs: uptime,
         worker_alive: alive,
+        renders: RenderStatus {
+            available: state.semaphore.available_permits(),
+            max: state.max_concurrent,
+        },
+        rate_limiter: RateLimiterStatus {
+            locked,
+            lock_remaining_secs: lock_remaining,
+        },
     };
     (StatusCode::OK, axum::Json(resp))
 }
@@ -139,13 +175,16 @@ pub async fn generate_pdf_handler(
         );
     }
 
-    if !VALID_FORMATS.iter().any(|f| f.eq_ignore_ascii_case(&payload.format)) {
-        return (
-            StatusCode::BAD_REQUEST,
-            plain_text_headers(),
-            format!("Invalid format. Valid options: {}", VALID_FORMATS.join(", ")).into(),
-        );
-    }
+    let format = match VALID_FORMATS.iter().find(|f| f.eq_ignore_ascii_case(&payload.format)) {
+        Some(canonical) => (*canonical).to_string(),
+        None => {
+            return (
+                StatusCode::BAD_REQUEST,
+                plain_text_headers(),
+                format!("Invalid format. Valid options: {}", VALID_FORMATS.join(", ")).into(),
+            );
+        }
+    };
 
     // Concurrency gate
     let Ok(permit) = state.semaphore.try_acquire() else {
@@ -213,7 +252,7 @@ pub async fn generate_pdf_handler(
         html_path: html_path.clone(),
         pdf_path: pdf_path.clone(),
         landscape: payload.landscape,
-        format: payload.format,
+        format,
         print_background: payload.print_background,
         scale: payload.scale,
         omit_background: payload.omit_background,
