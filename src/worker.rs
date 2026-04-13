@@ -156,6 +156,10 @@ pub async fn start_worker(state: &Arc<AppState>) -> Result<(), String> {
                 Err(e) => {
                     tracing::error!("Error reading worker stdout: {e}");
                     *alive_flag.lock().await = false;
+                    let mut map = pending.lock().await;
+                    for (_, tx) in map.drain() {
+                        let _ = tx.send(Err("Worker stdout read error".to_string()));
+                    }
                     break;
                 }
             }

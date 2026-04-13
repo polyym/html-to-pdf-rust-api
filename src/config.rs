@@ -10,7 +10,6 @@ pub struct Config {
     pub render_timeout_secs: u64,
     pub max_body_size_bytes: usize,
     pub cors_allow_origin: String,
-    pub trust_proxy: bool,
 }
 
 impl Config {
@@ -34,9 +33,6 @@ impl Config {
                 .unwrap_or(5_242_880),
             cors_allow_origin: std::env::var("CORS_ALLOW_ORIGIN")
                 .unwrap_or_else(|_| "*".to_string()),
-            trust_proxy: std::env::var("TRUST_PROXY")
-                .map(|v| v == "true" || v == "1")
-                .unwrap_or(false),
         }
     }
 }

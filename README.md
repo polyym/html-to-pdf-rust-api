@@ -13,7 +13,7 @@ src/
 ├── main.rs            Entry point, router, middleware, shutdown
 ├── config.rs          Environment variable parsing
 ├── state.rs           Shared application state
-├── rate_limiter.rs    IP-based rate limiting
+├── rate_limiter.rs    Global rate limiting
 ├── worker.rs          Node.js worker IPC and lifecycle
 ├── handlers.rs        HTTP handlers and request validation
 pdf-worker.ts          Headless Chrome PDF rendering (TypeScript)
@@ -99,7 +99,7 @@ Returns service health status.
   "uptime_secs": 3600,
   "worker_alive": true,
   "renders": { "available": 3, "max": 4 },
-  "rate_limiter": { "locked": false, "lock_remaining_secs": 0 }
+  "rate_limiter": { "cooldown_remaining_secs": 0 }
 }
 ```
 
@@ -117,7 +117,6 @@ All settings are configured via environment variables:
 | `RENDER_TIMEOUT_SECS` | `30` | Timeout per render request (seconds) |
 | `MAX_BODY_SIZE_BYTES` | `5242880` | Max request body size (5 MB) |
 | `CORS_ALLOW_ORIGIN` | `*` | Allowed CORS origin (a warning is logged when using wildcard) |
-| `TRUST_PROXY` | `false` | Set to `true` to read client IP from `X-Forwarded-For` header (enable when behind a reverse proxy) |
 
 ## Deploying to Render
 
@@ -131,18 +130,17 @@ All settings are configured via environment variables:
 
 ## Rate Limiting
 
-The API enforces IP-based rate limiting to prevent abuse while remaining open for multiple client applications:
+The API enforces a global **30-second cooldown** between requests. Any request made within 30 seconds of the previous one receives a `429 Too Many Requests` response with the number of seconds to wait. The cooldown is in-memory and resets on restart.
 
-- **Single-source lock:** Only one IP address can use the API at a time. Once a source makes a request, that IP has exclusive access for **1 hour**. Any other IP receives a `429` response until the lock expires.
-- **Per-source cooldown:** The active source must wait **30 seconds** between requests. Requests made within the cooldown window receive a `429` response.
-- **Proxy support:** When `TRUST_PROXY=true`, the server reads the client IP from the `X-Forwarded-For` header. This should only be enabled when deployed behind a trusted reverse proxy (e.g., Render, Nginx). When disabled (default), the direct socket address is always used.
+Successful (`200`) and rate-limited (`429`) responses include standard rate limit headers:
 
-**Behaviour depends on `TRUST_PROXY`:**
+| Header | Description |
+|--------|-------------|
+| `X-RateLimit-Limit` | Maximum requests per 30-second window (`1`) |
+| `X-RateLimit-Remaining` | Requests remaining in the current window |
+| `X-RateLimit-Reset` | Seconds until the cooldown expires (relative, not a Unix timestamp) |
 
-- `TRUST_PROXY=false` (default): On proxied platforms, all clients share the same apparent IP. The 1-hour lock is bypassed and the 30-second cooldown becomes a global throttle across all users.
-- `TRUST_PROXY=true`: Real client IPs are used. The 1-hour single-source lock is enforced per IP, blocking all other clients for the duration of the window.
-
-Both are valid patterns. Set `TRUST_PROXY` according to your intended access policy.
+Rate-limited `429` responses additionally include a `Retry-After` header with the number of seconds to wait before retrying.
 
 ## Security
 
@@ -156,7 +154,6 @@ Both are valid patterns. Set `TRUST_PROXY` according to your intended access pol
 |--------|-----------|
 | 400 | Malformed JSON, missing or empty `html` field, invalid `format`, or `scale` out of range |
 | 413 | Payload exceeds body size limit |
-| 429 | Another source is currently active (single-source lock) |
 | 429 | Request sent within 30-second cooldown window |
 | 429 | All rendering slots busy (concurrency limit reached) |
 | 500 | Worker crash, file system error, or rendering failure |

@@ -1,11 +1,10 @@
 //! HTTP handlers for the `/generate-pdf` and `/health` endpoints, plus
 //! request validation and helper utilities.
 
-use std::net::SocketAddr;
 use std::sync::Arc;
 
 use axum::{
-    extract::{ConnectInfo, State},
+    extract::State,
     http::{HeaderMap, HeaderValue, StatusCode},
     response::IntoResponse,
 };
@@ -74,29 +73,10 @@ struct RenderStatus {
 /// Current rate limiter state (nested under `rate_limiter` in the health response).
 #[derive(Serialize)]
 struct RateLimiterStatus {
-    locked: bool,
-    lock_remaining_secs: u64,
+    cooldown_remaining_secs: u64,
 }
 
 // --- Helpers ---
-
-/// Returns the client IP, reading from `X-Forwarded-For` when `trust_proxy` is true.
-///
-/// Uses the **rightmost** entry, which is the one added by the nearest trusted
-/// proxy and cannot be spoofed by the client (assuming a single proxy layer).
-fn extract_client_ip(headers: &HeaderMap, addr: &SocketAddr, trust_proxy: bool) -> String {
-    if trust_proxy
-        && let Some(forwarded) = headers.get("x-forwarded-for")
-        && let Ok(val) = forwarded.to_str()
-        && let Some(last) = val.rsplit(',').next()
-    {
-        let ip = last.trim();
-        if !ip.is_empty() {
-            return ip.to_string();
-        }
-    }
-    addr.ip().to_string()
-}
 
 fn plain_text_headers() -> HeaderMap {
     let mut headers = HeaderMap::new();
@@ -112,7 +92,7 @@ fn plain_text_headers() -> HeaderMap {
 pub async fn health_handler(State(state): State<Arc<AppState>>) -> impl IntoResponse {
     let alive = *state.worker_alive.lock().await;
     let uptime = state.started_at.elapsed().as_secs();
-    let (locked, lock_remaining) = state.rate_limiter.lock().await.status();
+    let cooldown_remaining = state.rate_limiter.lock().await.status();
 
     let resp = HealthResponse {
         status: if alive { "ok" } else { "degraded" },
@@ -124,8 +104,7 @@ pub async fn health_handler(State(state): State<Arc<AppState>>) -> impl IntoResp
             max: state.max_concurrent,
         },
         rate_limiter: RateLimiterStatus {
-            locked,
-            lock_remaining_secs: lock_remaining,
+            cooldown_remaining_secs: cooldown_remaining,
         },
     };
     (StatusCode::OK, axum::Json(resp))
@@ -133,24 +112,14 @@ pub async fn health_handler(State(state): State<Arc<AppState>>) -> impl IntoResp
 
 /// Accepts HTML and PDF options, renders via the worker, and returns the PDF.
 ///
-/// Pipeline: rate-limit → validate → acquire semaphore → ensure worker →
+/// Pipeline: validate → rate-limit → acquire semaphore → ensure worker →
 /// write HTML to temp file → send IPC request → await response → return PDF bytes.
 #[allow(clippy::too_many_lines)] // Linear request pipeline; splitting would scatter single-caller logic.
 pub async fn generate_pdf_handler(
     State(state): State<Arc<AppState>>,
-    ConnectInfo(addr): ConnectInfo<SocketAddr>,
-    headers: HeaderMap,
     axum::Json(payload): axum::Json<GeneratePdfRequest>,
 ) -> impl IntoResponse {
-    // Rate limiting
-    let source_ip = extract_client_ip(&headers, &addr, state.trust_proxy);
-    {
-        let mut limiter = state.rate_limiter.lock().await;
-        if let Err((status, msg)) = limiter.check(&source_ip) {
-            return (status, plain_text_headers(), msg.into_bytes());
-        }
-    }
-
+    // Validate before rate limiting so malformed requests don't consume the cooldown.
     if payload.html.trim().is_empty() {
         return (
             StatusCode::BAD_REQUEST,
@@ -185,6 +154,19 @@ pub async fn generate_pdf_handler(
             );
         }
     };
+
+    // Rate limiting (after validation so typos don't consume the cooldown)
+    {
+        let mut limiter = state.rate_limiter.lock().await;
+        if let Err((status, msg, wait)) = limiter.check() {
+            let mut headers = plain_text_headers();
+            headers.insert("retry-after", HeaderValue::from(wait));
+            headers.insert("x-ratelimit-limit", HeaderValue::from_static("1"));
+            headers.insert("x-ratelimit-remaining", HeaderValue::from_static("0"));
+            headers.insert("x-ratelimit-reset", HeaderValue::from(wait));
+            return (status, headers, msg.into_bytes());
+        }
+    }
 
     // Concurrency gate
     let Ok(permit) = state.semaphore.try_acquire() else {
@@ -336,12 +318,16 @@ pub async fn generate_pdf_handler(
     match result {
         Ok(()) => match tokio::fs::read(&pdf_path).await {
             Ok(pdf_bytes) => {
+                let reset = state.rate_limiter.lock().await.status();
                 let mut headers = HeaderMap::new();
                 headers.insert("content-type", HeaderValue::from_static("application/pdf"));
                 headers.insert(
                     "content-disposition",
                     HeaderValue::from_static("attachment; filename=generated-document.pdf"),
                 );
+                headers.insert("x-ratelimit-limit", HeaderValue::from_static("1"));
+                headers.insert("x-ratelimit-remaining", HeaderValue::from_static("0"));
+                headers.insert("x-ratelimit-reset", HeaderValue::from(reset));
                 (StatusCode::OK, headers, pdf_bytes)
             }
             Err(e) => {

@@ -28,10 +28,8 @@ pub struct AppState {
     pub worker_alive: Arc<Mutex<bool>>,
     /// Serialises worker spawn attempts so only one runs at a time.
     pub worker_spawn_lock: Mutex<()>,
-    /// IP-based rate limiter (single-source lock + per-source cooldown).
+    /// Global rate limiter (30-second cooldown between requests).
     pub rate_limiter: Mutex<RateLimiter>,
-    /// When true, read client IP from `X-Forwarded-For` instead of the socket address.
-    pub trust_proxy: bool,
     /// Maximum allowed HTML payload size in bytes.
     pub max_html_size: usize,
     /// Tracks the last worker spawn attempt to enforce a cooldown between retries.

@@ -10,7 +10,7 @@ mod rate_limiter;
 mod state;
 mod worker;
 
-use std::{collections::HashMap, net::SocketAddr, sync::Arc};
+use std::{collections::HashMap, sync::Arc};
 
 use axum::{
     http::{HeaderValue, Method},
@@ -100,21 +100,8 @@ async fn main() {
         port = config.port,
         max_concurrent = config.max_concurrent_renders,
         timeout_secs = config.render_timeout_secs,
-        trust_proxy = config.trust_proxy,
         "Starting html-to-pdf-service"
     );
-
-    if config.trust_proxy {
-        tracing::info!(
-            "TRUST_PROXY enabled: rate limiting uses real client IPs from X-Forwarded-For. \
-            Single-source 1-hour lock is active."
-        );
-    } else {
-        tracing::info!(
-            "TRUST_PROXY disabled: rate limiting uses socket address. \
-            On proxied deployments, the 30-second cooldown acts as a global throttle."
-        );
-    }
 
     let state = Arc::new(AppState {
         worker_stdin: Mutex::new(None),
@@ -124,7 +111,6 @@ async fn main() {
         worker_alive: Arc::new(Mutex::new(false)),
         worker_spawn_lock: Mutex::new(()),
         rate_limiter: Mutex::new(RateLimiter::new()),
-        trust_proxy: config.trust_proxy,
         max_html_size: config.max_body_size_bytes,
         last_spawn_attempt: Mutex::new(None),
         started_at: tokio::time::Instant::now(),
@@ -166,10 +152,7 @@ async fn main() {
         .await
         .unwrap_or_else(|e| panic!("Failed to bind to {addr}: {e}. Is the port already in use?"));
 
-    axum::serve(
-        listener,
-        app.into_make_service_with_connect_info::<SocketAddr>(),
-    )
+    axum::serve(listener, app.into_make_service())
     .with_graceful_shutdown(shutdown_signal())
     .await
     .expect("Server encountered a fatal error");
